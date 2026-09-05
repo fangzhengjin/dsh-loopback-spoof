@@ -1,0 +1,7 @@
+packages:
+  - .
+
+# DSH runtime peers are unpublished developer-preview workspaces. The plugin
+# resolves them from the active profile's official module fallback instead of
+# installing a second Harness graph.
+autoInstallPeers: false

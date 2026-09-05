@@ -1,21 +1,21 @@
-# Replace both shipped loopback trust surfaces from one Bundle. The WebServer
-# entry owns the Host request view; the package root remains the dual-face
-# Connection plugin whose browser half fixes page-local loopback classification.
+# Keep the official WebServer and its authentication-visible request facts,
+# but bind all interfaces by default so Web runtime derives LAN trust and an
+# authenticated LAN URL. Replace only the dual-face Connection entry: its Host
+# half re-exports the official implementation, while its browser half fixes
+# page-local loopback classification.
 - id: webserver
-  disabled: true
+  config:
+    host: !!js ctx.webStartup.host ?? '0.0.0.0'
+    port: !!js ctx.webStartup.port ?? 3080
+    compression: gzip
+    compressionLevel: 1
+    compressionThresholdBytes: 1024
 
 - id: connection
   name: '@deepseek-ai/dsh-client-connection'
   disabled: true
 
 - insert:
-    - id: loopback-spoof-webserver
-      name: dsh-loopback-spoof/webserver
-      inject: [webStartup]
-      config:
-        host: !!js ctx.webStartup.host ?? '0.0.0.0'
-        port: !!js ctx.webStartup.port ?? 3080
-
     - id: loopback-spoof-connection
       name: dsh-loopback-spoof
       inject: [webRuntime]

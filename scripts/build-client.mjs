@@ -2,35 +2,32 @@ import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { dirname, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { OFFICIAL_CONNECTION_NAME, resolveOfficialHarness } from './official-harness.mjs'
 
-export const UPSTREAM_NAME = '@deepseek-ai/dsh-client-connection'
+export const UPSTREAM_NAME = OFFICIAL_CONNECTION_NAME
 
 const require = createRequire(import.meta.url)
 const projectManifest = /** @type {Record<string, unknown>} */ (require('../package.json'))
 if (typeof projectManifest.name !== 'string' || projectManifest.name.length === 0) {
   throw new Error('build client bundle: package.json name must be a non-empty string')
 }
-if (typeof projectManifest.dependencies !== 'object' || projectManifest.dependencies === null) {
-  throw new Error('build client bundle: package.json dependencies must contain the upstream client package')
+if (typeof projectManifest.peerDependencies !== 'object' || projectManifest.peerDependencies === null) {
+  throw new Error('build client bundle: package.json peerDependencies must contain the official Connection package')
 }
-const projectDependencies = /** @type {Record<string, unknown>} */ (projectManifest.dependencies)
-if (typeof projectDependencies[UPSTREAM_NAME] !== 'string' || projectDependencies[UPSTREAM_NAME].length === 0) {
-  throw new Error(`build client bundle: package.json dependencies must pin ${UPSTREAM_NAME}`)
+const projectPeers = /** @type {Record<string, unknown>} */ (projectManifest.peerDependencies)
+if (typeof projectPeers[UPSTREAM_NAME] !== 'string' || projectPeers[UPSTREAM_NAME].length === 0) {
+  throw new Error(`build client bundle: package.json peerDependencies must pin ${UPSTREAM_NAME}`)
 }
 
 export const CLIENT_ID = projectManifest.name
-export const UPSTREAM_VERSION = projectDependencies[UPSTREAM_NAME]
+export const UPSTREAM_VERSION = projectPeers[UPSTREAM_NAME]
 
 const REGISTRATION_ID = `\tid: "${UPSTREAM_NAME}",`
 const REPLACEMENT_REGISTRATION_ID = `\tid: ${JSON.stringify(CLIENT_ID)},`
 const PROVIDE_MARKER = '\t\t\tctx.provide("connection", handle);'
 const APPLY_EXPORT_MARKER = '\t\texports.apply = apply;'
-const LOOPBACK_EXPRESSION = 'isLoopback: pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname),'
+const LOOPBACK_EXPRESSION = 'isLoopback: transport?.ownsHost === true || pageLocation === void 0 || isLoopbackHostname(pageLocation.hostname),'
 const LOOPBACK_REPLACEMENT = 'isLoopback: true,'
-const RPC_ID_EXPRESSION = 'return RpcId(crypto.randomUUID());'
-const RPC_ID_REPLACEMENT = 'return RpcId(randomUuid());'
-const RANDOM_UUID_DEFINITION = 'function randomUuid() {'
-const RANDOM_VALUES_EXPRESSION = 'globalThis.crypto.getRandomValues(new Uint8Array(16))'
 const SOURCE_MAP_LINE = '\n//# sourceMappingURL=client.js.map'
 
 /**
@@ -65,59 +62,32 @@ function assertUnique(source, marker, description) {
 }
 
 /**
- * Validate the installed upstream package identity pinned by this project.
- * Node's resolver remains the single source for the exported browser subpath.
- * @param {unknown} value
- * @returns {void}
- */
-export function validateUpstreamManifest(value) {
-  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
-    throw new Error('build client bundle: upstream package.json must contain an object')
-  }
-  const manifest = /** @type {Record<string, unknown>} */ (value)
-  if (manifest.name !== UPSTREAM_NAME) {
-    throw new Error(`build client bundle: expected upstream name ${UPSTREAM_NAME}, received ${String(manifest.name)}`)
-  }
-  if (manifest.version !== UPSTREAM_VERSION) {
-    throw new Error(`build client bundle: expected upstream version ${UPSTREAM_VERSION}, received ${String(manifest.version)}`)
-  }
-}
-
-/**
  * Derive this package's browser provider from the pinned upstream artifact.
- * Replace its identity, loopback classification, and secure-context-only RPC ID call,
- * then remove the stale upstream source-map footer.
+ * Replace its identity and loopback classification, then remove the stale
+ * upstream source-map footer.
  * @param {string} source
  * @returns {string}
  */
 export function transformClientBundle(source) {
   assertUnique(source, REGISTRATION_ID, 'upstream registration id')
-  assertUnique(source, LOOPBACK_EXPRESSION, 'connection isLoopback hostname expression')
-  assertUnique(source, RPC_ID_EXPRESSION, 'secure-context-only API rpcId generator')
-  assertUnique(source, RANDOM_UUID_DEFINITION, 'insecure-origin-compatible randomUuid definition')
-  assertUnique(source, RANDOM_VALUES_EXPRESSION, 'randomUuid getRandomValues implementation')
+  assertUnique(source, LOOPBACK_EXPRESSION, 'connection isLoopback expression')
   assertUnique(source, PROVIDE_MARKER, 'connection provider registration')
   assertUnique(source, APPLY_EXPORT_MARKER, 'client apply export')
 
   const transformed = source
     .replace(REGISTRATION_ID, REPLACEMENT_REGISTRATION_ID)
     .replace(LOOPBACK_EXPRESSION, LOOPBACK_REPLACEMENT)
-    .replace(RPC_ID_EXPRESSION, RPC_ID_REPLACEMENT)
     .replace(SOURCE_MAP_LINE, '\n')
 
   assertUnique(transformed, REPLACEMENT_REGISTRATION_ID, 'replacement registration id')
   if (!transformed.includes(LOOPBACK_REPLACEMENT)) {
     throw new Error('build client bundle: constant loopback provider field is missing after transformation')
   }
-  assertUnique(transformed, RPC_ID_REPLACEMENT, 'insecure-origin-compatible API rpcId generator')
   if (transformed.includes(LOOPBACK_EXPRESSION)) {
     throw new Error('build client bundle: hostname expression remained after transformation')
   }
   if (transformed.includes('sourceMappingURL=client.js.map')) {
     throw new Error('build client bundle: stale source-map footer remained after transformation')
-  }
-  if (transformed.includes(RPC_ID_EXPRESSION)) {
-    throw new Error('build client bundle: secure-context-only API rpcId generator remained after transformation')
   }
   return transformed
 }
@@ -127,19 +97,7 @@ export function transformClientBundle(source) {
  * @returns {Promise<string>}
  */
 export async function resolveUpstreamClientPath() {
-  const manifestPath = require.resolve(`${UPSTREAM_NAME}/package.json`)
-  let manifest
-  try {
-    manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
-  } catch (error) {
-    throw new Error(`build client bundle: cannot read upstream package.json: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
-  }
-  validateUpstreamManifest(manifest)
-  try {
-    return require.resolve(`${UPSTREAM_NAME}/client`)
-  } catch (error) {
-    throw new Error(`build client bundle: cannot resolve ${UPSTREAM_NAME}/client through Node package exports: ${error instanceof Error ? error.message : String(error)}`, { cause: error })
-  }
+  return (await resolveOfficialHarness()).connectionClientPath
 }
 
 /**

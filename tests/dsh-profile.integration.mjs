@@ -1,4 +1,4 @@
-/** Real Profile acceptance for the combined Host and browser Bundle. */
+/** Real Profile acceptance for the official Host and patched browser Bundle. */
 
 import assert from 'node:assert/strict'
 import { spawn, spawnSync } from 'node:child_process'
@@ -10,15 +10,13 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import vm from 'node:vm'
+import { resolveOfficialHarness } from '../scripts/official-harness.mjs'
 
-const DSH_SOURCE_PACKAGE_NAME = '@deepseek-ai/dsh-root'
-const DSH_INSTALLED_PACKAGE_NAME = '@deepseek-ai/dsh'
 const UPSTREAM_CONNECTION = '@deepseek-ai/dsh-client-connection'
-const UPSTREAM_WEBSERVER = '@deepseek-ai/dsh-host-webserver'
 const CLIENT_MODULES_ID = '@deepseek-ai/dsh-client-modules'
 const PLUGIN_NAME = 'dsh-loopback-spoof'
-const READY_PATTERN = /dsh web: http:\/\/127\.0\.0\.1:(\d+)(?: \(LAN: http:\/\/([^:]+):(\d+)\))?\r?\n/
-const TEST_API_PATH = '/api/events.mux'
+const READY_PATTERN = /dsh web: (http:\/\/127\.0\.0\.1:\d+\/\?token=[^ )\r\n]+)(?: \(LAN: (http:\/\/[^)\r\n]+)\))?\r?\n/
+const TEST_API_PATH = '/api/remote.mux'
 const TEMP_PREFIX = 'dsh-loopback-combined-'
 const PROCESS_OUTPUT_LIMIT = 20_000
 const OPERATION_TIMEOUT_MS = 120_000
@@ -38,12 +36,13 @@ function resolvePluginSource() {
   return source
 }
 
-/** @typedef {{ root: string, nodeArgs: string[] }} Harness */
+/** @typedef {{ root: string, nodeArgs: string[], require: NodeJS.Require }} Harness */
 /** @typedef {{ child: ReturnType<typeof spawn>, stdout: string, stderr: string }} Runtime */
-/** @typedef {{ port: number, lanHost?: string, lanPort?: number }} Ready */
+/** @typedef {{ localUrl: string, port: number, lanUrl?: string, lanHost?: string, lanPort?: number }} Ready */
 /** @typedef {Record<string, unknown> & { id: string, url: string, rev: string }} BootEntry */
-/** @typedef {{ rev: string, entries: BootEntry[] }} BootGraph */
-/** @typedef {{ isLoopback: boolean, api: unknown }} ConnectionHandle */
+/** @typedef {Record<string, unknown> & { phase: 'bootstrap' | 'application', url: string, rev: string, entries: string[] }} BootBatch */
+/** @typedef {{ rev: string, entries: BootEntry[], batches: BootBatch[] }} BootGraph */
+/** @typedef {{ isLoopback: boolean, rpc: unknown }} ConnectionHandle */
 
 /** @param {string} path @param {string} label @returns {Record<string, unknown>} */
 function readJsonObject(path, label) {
@@ -68,89 +67,37 @@ function objectField(value, key, label) {
   return /** @type {Record<string, unknown>} */ (field)
 }
 
-/** @returns {Harness} */
-function resolveHarness() {
-  const sourceInput = process.env.DSH_HARNESS_ROOT?.trim() ?? ''
-  const installedInput = process.env.DSH_BIN_PATH?.trim() ?? ''
-  if (sourceInput !== '' && installedInput !== '') {
-    throw new Error('integration: set only one of DSH_HARNESS_ROOT or DSH_BIN_PATH')
-  }
-  if (sourceInput === '' && installedInput === '') {
-    throw new Error('integration: set DSH_HARNESS_ROOT to a source workspace or DSH_BIN_PATH to an installed dsh lib/bin.js')
-  }
-
-  const pluginManifest = readJsonObject(join(projectRoot, 'package.json'), 'plugin manifest')
-  const dependencies = objectField(pluginManifest, 'dependencies', 'plugin manifest')
-  const peers = objectField(pluginManifest, 'peerDependencies', 'plugin manifest')
-  const expectedConnectionVersion = dependencies[UPSTREAM_CONNECTION]
-  const expectedWebserverVersion = peers[UPSTREAM_WEBSERVER]
-  for (const output of ['index.js', 'webserver.js', 'client.js']) {
+/** @returns {Promise<Harness>} */
+async function resolveHarness() {
+  const official = await resolveOfficialHarness()
+  for (const output of ['index.js', 'client.js']) {
     if (!existsSync(join(projectRoot, 'lib', output))) {
       throw new Error(`integration: lib/${output} is missing; run pnpm run build before the integration test`)
     }
   }
 
-  if (installedInput !== '') {
-    if (!isAbsolute(installedInput)) {
-      throw new Error(`integration: DSH_BIN_PATH must be absolute, got ${JSON.stringify(installedInput)}`)
-    }
-    const binPath = resolve(installedInput)
-    const root = resolve(dirname(binPath), '..')
-    const manifestPath = join(root, 'package.json')
-    if (!existsSync(binPath) || !existsSync(manifestPath)) {
-      throw new Error(`integration: DSH_BIN_PATH does not identify an installed dsh lib/bin.js: ${binPath}`)
-    }
-    const harnessManifest = readJsonObject(manifestPath, 'installed DSH manifest')
-    if (harnessManifest.name !== DSH_INSTALLED_PACKAGE_NAME || harnessManifest.version !== expectedConnectionVersion) {
-      throw new Error(
-        `integration: installed DSH ${JSON.stringify(harnessManifest.name)}@${JSON.stringify(harnessManifest.version)} does not match ${DSH_INSTALLED_PACKAGE_NAME}@${JSON.stringify(expectedConnectionVersion)}`,
-      )
-    }
-    let webserverManifestPath
-    try {
-      webserverManifestPath = createRequire(manifestPath).resolve(`${UPSTREAM_WEBSERVER}/package.json`)
-    } catch (error) {
-      throw new Error(`integration: installed DSH cannot resolve ${UPSTREAM_WEBSERVER}/package.json: ${String(error)}`, { cause: error })
-    }
-    const webserverManifest = readJsonObject(webserverManifestPath, 'installed DSH WebServer manifest')
-    if (webserverManifest.name !== UPSTREAM_WEBSERVER || webserverManifest.version !== expectedWebserverVersion) {
-      throw new Error(
-        `integration: installed WebServer ${JSON.stringify(webserverManifest.name)}@${JSON.stringify(webserverManifest.version)} does not match ${UPSTREAM_WEBSERVER}@${JSON.stringify(expectedWebserverVersion)}`,
-      )
-    }
-    return { root, nodeArgs: [binPath] }
+  const manifestPath = join(official.root, 'package.json')
+  const binPath = join(official.root, 'apps', 'cli', 'src', 'bin.ts')
+  const distIndex = join(official.root, 'apps', 'web', 'dist', 'index.html')
+  if (!existsSync(binPath) || !existsSync(distIndex)) {
+    throw new Error(`integration: official DSH workspace lacks the source CLI or built Web app: ${official.root}`)
   }
-
-  if (!isAbsolute(sourceInput)) {
-    throw new Error(`integration: DSH_HARNESS_ROOT must be absolute, got ${JSON.stringify(sourceInput)}`)
-  }
-  const root = resolve(sourceInput)
-  const manifestPath = join(root, 'package.json')
-  const webserverManifestPath = join(root, 'packages', 'host', 'webserver', 'package.json')
-  const binPath = join(root, 'apps', 'cli', 'src', 'bin.ts')
-  const distIndex = join(root, 'apps', 'web', 'dist', 'index.html')
-  if (!existsSync(manifestPath) || !existsSync(webserverManifestPath) || !existsSync(binPath) || !existsSync(distIndex)) {
-    throw new Error(`integration: DSH_HARNESS_ROOT lacks the source CLI, WebServer package, or built Web app: ${root}`)
-  }
-  const harnessManifest = readJsonObject(manifestPath, 'DSH source manifest')
-  const webserverManifest = readJsonObject(webserverManifestPath, 'DSH source WebServer manifest')
-  if (harnessManifest.name !== DSH_SOURCE_PACKAGE_NAME || harnessManifest.version !== expectedConnectionVersion) {
-    throw new Error(
-      `integration: DSH source ${JSON.stringify(harnessManifest.name)}@${JSON.stringify(harnessManifest.version)} does not match ${DSH_SOURCE_PACKAGE_NAME}@${JSON.stringify(expectedConnectionVersion)}`,
-    )
-  }
-  if (webserverManifest.name !== UPSTREAM_WEBSERVER || webserverManifest.version !== expectedWebserverVersion) {
-    throw new Error(
-      `integration: source WebServer ${JSON.stringify(webserverManifest.name)}@${JSON.stringify(webserverManifest.version)} does not match ${UPSTREAM_WEBSERVER}@${JSON.stringify(expectedWebserverVersion)}`,
-    )
+  const harnessRequire = createRequire(manifestPath)
+  const gatewayManifestPath = join(official.root, 'packages', 'api', 'gateway', 'package.json')
+  if (!existsSync(gatewayManifestPath)) {
+    throw new Error(`integration: official DSH workspace lacks the API Gateway manifest: ${official.root}`)
   }
   let tsxImport
   try {
-    tsxImport = pathToFileURL(createRequire(manifestPath).resolve('tsx/esm')).href
+    tsxImport = pathToFileURL(harnessRequire.resolve('tsx/esm')).href
   } catch (error) {
-    throw new Error(`integration: DSH source workspace cannot resolve tsx/esm: ${String(error)}`, { cause: error })
+    throw new Error(`integration: official DSH workspace cannot resolve tsx/esm: ${String(error)}`, { cause: error })
   }
-  return { root, nodeArgs: ['--import', tsxImport, binPath] }
+  return {
+    root: official.root,
+    nodeArgs: ['--import', tsxImport, binPath],
+    require: createRequire(gatewayManifestPath),
+  }
 }
 
 /** @param {string} dshHome @returns {NodeJS.ProcessEnv} */
@@ -172,11 +119,16 @@ function dshNodeArguments(harness, args) {
   return [...harness.nodeArgs, ...args]
 }
 
+/** @param {string} value @returns {string} */
+function redactLaunchTokens(value) {
+  return value.replace(/([?&]token=)[^ )\r\n]+/gu, '$1<redacted>')
+}
+
 /** @param {string} stdout @param {string} stderr @returns {string} */
 function formatProcessOutput(stdout, stderr) {
   return [
-    stdout === '' ? undefined : `stdout:\n${stdout}`,
-    stderr === '' ? undefined : `stderr:\n${stderr}`,
+    stdout === '' ? undefined : `stdout:\n${redactLaunchTokens(stdout)}`,
+    stderr === '' ? undefined : `stderr:\n${redactLaunchTokens(stderr)}`,
   ].filter(Boolean).join('\n')
 }
 
@@ -236,10 +188,36 @@ function startProfile(harness, environment, usePatchDefaultHost = false) {
 
 /** @param {RegExpExecArray} match @returns {Ready} */
 function parseReady(match) {
-  const port = Number(match[1])
-  const lanHost = match[2]
-  if (lanHost === undefined) return { port }
-  return { port, lanHost, lanPort: Number(match[3]) }
+  const localText = match[1]
+  if (localText === undefined) {
+    throw new Error('integration: DSH web readiness output omitted the loopback URL')
+  }
+  let local
+  let lan
+  try {
+    local = new URL(localText)
+    lan = match[2] === undefined ? undefined : new URL(match[2])
+  } catch (error) {
+    throw new Error('integration: DSH web readiness output contains an invalid authenticated URL', { cause: error })
+  }
+  const launchProof = local.searchParams.get('token')
+  const port = Number(local.port)
+  if (local.hostname !== '127.0.0.1' || !Number.isSafeInteger(port) || port < 1
+    || launchProof === null || launchProof === '') {
+    throw new Error('integration: DSH web readiness output lacks a valid loopback token URL')
+  }
+  if (lan === undefined) return { localUrl: local.href, port }
+  const lanPort = Number(lan.port)
+  if (!Number.isSafeInteger(lanPort) || lanPort < 1 || lan.searchParams.get('token') !== launchProof) {
+    throw new Error('integration: DSH web LAN readiness URL must reuse the loopback port token')
+  }
+  return {
+    localUrl: local.href,
+    port,
+    lanUrl: lan.href,
+    lanHost: lan.hostname,
+    lanPort,
+  }
 }
 
 /** @param {Runtime} runtime @returns {Promise<Ready>} */
@@ -356,18 +334,25 @@ function requestFromExternalAuthority(port, connectHost = '127.0.0.1') {
 
 /** @typedef {{ close(): void, once(event: string, listener: (...args: unknown[]) => void): void, terminate(): void }} WebSocketHandle */
 
-/** @param {number} port @returns {Promise<void>} */
-function verifyExternalWebSocket(port) {
-  const projectRequire = createRequire(join(projectRoot, 'package.json'))
-  const connectionManifestPath = projectRequire.resolve(`${UPSTREAM_CONNECTION}/package.json`)
-  const connectionRequire = createRequire(connectionManifestPath)
-  const wsModule = connectionRequire('ws')
-  const WebSocketClient = /** @type {Function} */ (wsModule.WebSocket ?? wsModule)
+/** @param {Harness} harness @returns {Function} */
+function webSocketConstructor(harness) {
+  let wsModule
+  try {
+    wsModule = harness.require('ws')
+  } catch (error) {
+    throw new Error('integration: official DSH workspace cannot resolve ws', { cause: error })
+  }
+  return /** @type {Function} */ (wsModule.WebSocket ?? wsModule)
+}
+
+/** @param {Harness} harness @param {number} port @param {string} [connectHost] @returns {Promise<void>} */
+function verifyRejectedWebSocket(harness, port, connectHost = '127.0.0.1') {
+  const WebSocketClient = webSocketConstructor(harness)
   const authority = `external.invalid:${String(port)}`
 
   return new Promise((resolveSocket, rejectSocket) => {
     const socket = /** @type {WebSocketHandle} */ (Reflect.construct(WebSocketClient, [
-      `ws://127.0.0.1:${String(port)}${TEST_API_PATH}`,
+      `ws://${connectHost}:${String(port)}${TEST_API_PATH}`,
       {
         headers: {
           host: authority,
@@ -389,6 +374,57 @@ function verifyExternalWebSocket(port) {
       settled = true
       clearTimeout(timeout)
       if (error === undefined) {
+        resolveSocket()
+      } else {
+        socket.terminate()
+        rejectSocket(error)
+      }
+    }
+    socket.once('open', () => {
+      finish(new Error(`integration: unauthenticated external WebSocket ${TEST_API_PATH} unexpectedly opened`))
+    })
+    socket.once('error', (error) => {
+      finish(error instanceof Error ? error : new Error(String(error)))
+    })
+    socket.once('unexpected-response', (_request, response) => {
+      const statusCode = /** @type {{ statusCode?: unknown }} */ (response).statusCode
+      if (typeof /** @type {{ resume?: unknown }} */ (response).resume === 'function') {
+        /** @type {{ resume(): void }} */ (response).resume()
+      }
+      finish(statusCode === 403
+        ? undefined
+        : new Error(`integration: external WebSocket ${TEST_API_PATH} returned HTTP ${String(statusCode ?? 'unknown')}`))
+    })
+  })
+}
+
+/** @param {Harness} harness @param {string} launchUrl @param {string} cookie @returns {Promise<void>} */
+function verifyAuthenticatedWebSocket(harness, launchUrl, cookie) {
+  const WebSocketClient = webSocketConstructor(harness)
+  const target = new URL(TEST_API_PATH, launchUrl)
+  target.protocol = 'ws:'
+  target.search = ''
+
+  return new Promise((resolveSocket, rejectSocket) => {
+    const socket = /** @type {WebSocketHandle} */ (Reflect.construct(WebSocketClient, [target.href, {
+      headers: {
+        cookie,
+        origin: new URL(launchUrl).origin,
+      },
+    }]))
+    let settled = false
+    const timeout = setTimeout(() => {
+      if (settled) return
+      settled = true
+      socket.terminate()
+      rejectSocket(new Error(`integration: authenticated WebSocket ${TEST_API_PATH} timed out after 5000ms`))
+    }, 5_000)
+    /** @param {Error | undefined} error */
+    const finish = (error) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timeout)
+      if (error === undefined) {
         socket.close()
         resolveSocket()
       } else {
@@ -402,9 +438,61 @@ function verifyExternalWebSocket(port) {
     })
     socket.once('unexpected-response', (_request, response) => {
       const statusCode = /** @type {{ statusCode?: unknown }} */ (response).statusCode
-      finish(new Error(`integration: WebSocket ${TEST_API_PATH} returned HTTP ${String(statusCode ?? 'unknown')}`))
+      finish(new Error(`integration: authenticated WebSocket ${TEST_API_PATH} returned HTTP ${String(statusCode ?? 'unknown')}`))
     })
   })
+}
+
+/** @param {string} launchUrl @param {string} [cookie] @returns {Promise<number>} */
+async function indexStatus(launchUrl, cookie) {
+  const init = cookie === undefined
+    ? { redirect: /** @type {const} */ ('manual') }
+    : { headers: { cookie }, redirect: /** @type {const} */ ('manual') }
+  const response = await fetch(new URL('/', launchUrl), init)
+  await response.body?.cancel()
+  return response.status
+}
+
+/** @param {string} launchUrl @returns {Promise<{ cookie: string, html: string }>} */
+async function authenticateIndex(launchUrl) {
+  let target
+  try {
+    target = new URL(launchUrl)
+  } catch (error) {
+    throw new Error('integration: cannot authenticate an invalid DSH launch URL', { cause: error })
+  }
+  const launchProof = target.searchParams.get('token')
+  if (target.protocol !== 'http:' || target.pathname !== '/'
+    || launchProof === null || launchProof === '') {
+    throw new Error('integration: DSH launch URL must be an HTTP root URL carrying a token')
+  }
+
+  let exchange
+  try {
+    exchange = await fetch(target, { redirect: 'manual' })
+  } catch (error) {
+    throw new Error(`integration: token exchange failed for ${target.origin}`, { cause: error })
+  }
+  if (exchange.status !== 303) {
+    await exchange.body?.cancel()
+    throw new Error(`integration: token exchange for ${target.origin} returned HTTP ${String(exchange.status)}`)
+  }
+  const setCookie = exchange.headers.get('set-cookie')
+  await exchange.body?.cancel()
+  const cookie = setCookie?.split(';', 1)[0]?.trim()
+  if (cookie === undefined || cookie === '' || !cookie.includes('=')) {
+    throw new Error(`integration: token exchange for ${target.origin} omitted the browser cookie`)
+  }
+
+  const index = await fetch(new URL('/', target), {
+    headers: { cookie },
+    redirect: 'manual',
+  })
+  if (index.status !== 200) {
+    await index.body?.cancel()
+    throw new Error(`integration: authenticated index for ${target.origin} returned HTTP ${String(index.status)}`)
+  }
+  return { cookie, html: await index.text() }
 }
 
 /** @param {number} port @param {string} path @returns {Promise<string>} */
@@ -433,8 +521,8 @@ function bootInputs(html) {
     throw new Error('integration: __DSH_BOOT__ must contain an object')
   }
   const graph = /** @type {Record<string, unknown>} */ (parsed)
-  if (typeof graph.rev !== 'string' || !Array.isArray(graph.entries)) {
-    throw new Error('integration: __DSH_BOOT__ must carry string rev and entries array')
+  if (typeof graph.rev !== 'string' || !Array.isArray(graph.entries) || !Array.isArray(graph.batches)) {
+    throw new Error('integration: __DSH_BOOT__ must carry string rev, entries, and batches')
   }
   const entries = graph.entries.map((value) => {
     if (value === null || typeof value !== 'object' || Array.isArray(value)) {
@@ -446,12 +534,23 @@ function bootInputs(html) {
     }
     return /** @type {BootEntry} */ (entry)
   })
-  return { queueScript, graph: { rev: graph.rev, entries } }
+  const batches = graph.batches.map((value) => {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error('integration: __DSH_BOOT__ batch must contain an object')
+    }
+    const batch = /** @type {Record<string, unknown>} */ (value)
+    if ((batch.phase !== 'bootstrap' && batch.phase !== 'application')
+      || typeof batch.url !== 'string' || typeof batch.rev !== 'string'
+      || !Array.isArray(batch.entries) || batch.entries.some(id => typeof id !== 'string')) {
+      throw new Error('integration: __DSH_BOOT__ batch must carry a valid phase, url, rev, and entries')
+    }
+    return /** @type {BootBatch} */ (batch)
+  })
+  return { queueScript, graph: { rev: graph.rev, entries, batches } }
 }
 
 /** @param {number} port @param {string} queueScript @param {BootGraph} graph @returns {Promise<void>} */
 async function verifyBrowserLoader(port, queueScript, graph) {
-  const transportApi = { source: 'integration-transport' }
   const sandbox = /** @type {Record<string, unknown>} */ ({
     URL,
     URLSearchParams,
@@ -477,7 +576,6 @@ async function verifyBrowserLoader(port, queueScript, graph) {
     setTimeout,
     structuredClone,
     __DSH_TRANSPORT__: {
-      createApiClient: () => transportApi,
       fetch,
     },
   })
@@ -512,7 +610,7 @@ async function verifyBrowserLoader(port, queueScript, graph) {
   const handle = /** @type {ConnectionHandle | undefined} */ (connection)
   assert.ok(handle !== undefined, 'integration: loaded provider must publish ctx.connection')
   assert.equal(handle.isLoopback, true, 'integration: remote hostname must receive loopback classification')
-  assert.equal(handle.api, transportApi, 'integration: provider must preserve the injected transport API')
+  assert.ok(handle.rpc !== undefined, 'integration: provider must preserve the official RPC surface')
 }
 
 /** @param {string} dshHome @returns {string[]} */
@@ -529,17 +627,17 @@ function profileBundles(dshHome) {
 /** @param {string} dshHome @param {string} dump */
 function assertInstalledProfile(dshHome, dump) {
   assert.ok(profileBundles(dshHome).includes(PLUGIN_NAME), 'integration: generated profile must include this Bundle')
-  assert.match(dump, /name: dsh-loopback-spoof\/webserver/, 'integration: composed profile must mount the WebServer subpath')
-  assert.match(dump, /name: dsh-loopback-spoof\/webserver[\s\S]*?host: !!js ctx\.webStartup\.host \?\? '0\.0\.0\.0'/, 'integration: replacement WebServer must keep the declared default 0.0.0.0 bind expression')
+  assert.doesNotMatch(dump, /name: dsh-loopback-spoof\/webserver/, 'integration: composed profile must not replace the official WebServer')
+  assert.match(dump, /id: webserver[\s\S]*?host: !!js ctx\.webStartup\.host \?\? '0\.0\.0\.0'/, 'integration: official WebServer must receive the declared default 0.0.0.0 bind expression')
+  assert.match(dump, /id: webserver[\s\S]*?compression: gzip/, 'integration: official WebServer must retain explicit gzip configuration')
   assert.match(dump, /name: dsh-loopback-spoof(?:\r?\n|$)/, 'integration: composed profile must mount the root Connection')
   assert.match(dump, /name: '@deepseek-ai\/dsh-client-connection'[\s\S]*?disabled: true/, 'integration: stock Connection must be disabled')
-  assert.match(dump, /id: webserver[\s\S]*?disabled: true/, 'integration: stock WebServer must be disabled')
 }
 
 /** @param {string} dshHome @param {string} dump */
 function assertRemovedProfile(dshHome, dump) {
   assert.ok(!profileBundles(dshHome).includes(PLUGIN_NAME), 'integration: generated profile must remove this Bundle')
-  assert.doesNotMatch(dump, /name: dsh-loopback-spoof(?:\/webserver)?(?:\r?\n|$)/, 'integration: composed profile must remove both replacement entries')
+  assert.doesNotMatch(dump, /name: dsh-loopback-spoof(?:\r?\n|$)/, 'integration: composed profile must remove the replacement Connection')
 }
 
 /** @param {string} dshHome @param {string} temporaryRoot */
@@ -550,7 +648,7 @@ function validateTemporaryHome(dshHome, temporaryRoot) {
 }
 
 export async function runProfileIntegration() {
-  const harness = resolveHarness()
+  const harness = await resolveHarness()
   const pluginSource = resolvePluginSource()
   const temporaryRoot = resolve(tmpdir())
   const dshHome = await mkdtemp(join(temporaryRoot, TEMP_PREFIX))
@@ -567,7 +665,9 @@ export async function runProfileIntegration() {
     assert.equal(ready.lanHost, undefined, 'stock DSH with explicit 127.0.0.1 must not announce a LAN listener')
     let port = ready.port
     assert.equal(await requestFromExternalAuthority(port), 403, 'stock DSH must reject the external authority')
-    let graph = bootInputs(await fetchText(port, '/')).graph
+    assert.equal(await indexStatus(ready.localUrl), 401, 'stock DSH must reject an unauthenticated index request')
+    let authenticated = await authenticateIndex(ready.localUrl)
+    let graph = bootInputs(authenticated.html).graph
     assert.ok(graph.entries.some(entry => entry.id === UPSTREAM_CONNECTION), 'stock boot graph must contain the upstream Connection')
     assert.ok(!graph.entries.some(entry => entry.id === PLUGIN_NAME), 'stock boot graph must omit this Bundle')
     await stopProfile(runtime)
@@ -579,13 +679,17 @@ export async function runProfileIntegration() {
 
     runtime = startProfile(harness, environment, true)
     ready = await waitForReady(runtime)
-    assert.ok(ready.lanHost !== undefined, 'replacement WebServer default must announce an actual LAN listener')
+    assert.ok(ready.lanHost !== undefined && ready.lanUrl !== undefined, 'official WebServer default must announce an authenticated LAN URL')
     assert.equal(ready.lanPort, ready.port, 'LAN listener must use the ready port')
     port = ready.port
-    assert.equal(await requestFromExternalAuthority(port, ready.lanHost), 426, 'default 0.0.0.0 bind must be reachable through the announced LAN address')
-    assert.equal(await requestFromExternalAuthority(port), 426, 'combined Bundle must reach the ordinary-GET upgrade response')
-    await verifyExternalWebSocket(port)
-    const installedBoot = bootInputs(await fetchText(port, '/'))
+    assert.equal(await requestFromExternalAuthority(port, ready.lanHost), 403, 'LAN traffic must preserve the official Host and Origin trust fence')
+    assert.equal(await requestFromExternalAuthority(port), 403, 'loopback transport must not bypass the official external-authority fence')
+    await verifyRejectedWebSocket(harness, port, ready.lanHost)
+    assert.equal(await indexStatus(ready.lanUrl), 401, 'LAN index must reject requests without authentication')
+    authenticated = await authenticateIndex(ready.lanUrl)
+    assert.equal(await indexStatus(ready.localUrl, authenticated.cookie), 401, 'LAN browser cookie must remain bound to its request authority')
+    await verifyAuthenticatedWebSocket(harness, ready.lanUrl, authenticated.cookie)
+    const installedBoot = bootInputs(authenticated.html)
     graph = installedBoot.graph
     assert.ok(graph.entries.some(entry => entry.id === PLUGIN_NAME), 'installed boot graph must contain this Bundle')
     assert.ok(!graph.entries.some(entry => entry.id === UPSTREAM_CONNECTION), 'installed boot graph must omit the disabled upstream Connection')
@@ -595,7 +699,10 @@ export async function runProfileIntegration() {
 
     runtime = startProfile(harness, environment)
     ready = await waitForReady(runtime)
-    assert.equal(ready.lanHost, undefined, 'explicit --host 127.0.0.1 must suppress the replacement WebServer LAN listener')
+    assert.equal(ready.lanHost, undefined, 'explicit --host 127.0.0.1 must suppress the official WebServer LAN listener')
+    authenticated = await authenticateIndex(ready.localUrl)
+    graph = bootInputs(authenticated.html).graph
+    assert.ok(graph.entries.some(entry => entry.id === PLUGIN_NAME), 'explicit loopback bind must keep the installed browser Bundle')
     await stopProfile(runtime)
     runtime = undefined
 
@@ -608,13 +715,15 @@ export async function runProfileIntegration() {
     assert.equal(ready.lanHost, undefined, 'removed profile with explicit 127.0.0.1 must not announce a LAN listener')
     port = ready.port
     assert.equal(await requestFromExternalAuthority(port), 403, 'removal must restore the stock Host trust fence')
-    graph = bootInputs(await fetchText(port, '/')).graph
+    assert.equal(await indexStatus(ready.localUrl), 401, 'removal must preserve stock browser authentication')
+    authenticated = await authenticateIndex(ready.localUrl)
+    graph = bootInputs(authenticated.html).graph
     assert.ok(graph.entries.some(entry => entry.id === UPSTREAM_CONNECTION), 'removal must restore the upstream browser Connection')
     assert.ok(!graph.entries.some(entry => entry.id === PLUGIN_NAME), 'removal must remove the combined browser module')
     await stopProfile(runtime)
     runtime = undefined
 
-    process.stdout.write('DSH combined integration passed: one Bundle install and removal switch both Host and browser loopback surfaces together after restart.\n')
+    process.stdout.write('DSH integration passed: the Bundle preserves official authentication and Host trust while switching browser loopback classification and the default LAN bind.\n')
   } catch (error) {
     operationError = error
   }

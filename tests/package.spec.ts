@@ -6,6 +6,7 @@ const root = resolve(import.meta.dirname, '..')
 
 interface Manifest {
   name?: unknown
+  version?: unknown
   private?: unknown
   repository?: { type?: unknown; url?: unknown }
   exports?: Record<string, unknown>
@@ -24,7 +25,7 @@ async function manifest(): Promise<Manifest> {
 }
 
 describe('combined Profile Bundle declaration', () => {
-  it('declares one Bundle with root Connection, browser, and WebServer subpath exports', async () => {
+  it('declares one Bundle with root and browser Connection exports', async () => {
     const value = await manifest()
     expect(value.name).toBe('dsh-loopback-spoof')
     expect(value.private).toBe(true)
@@ -36,10 +37,7 @@ describe('combined Profile Bundle declaration', () => {
       types: './lib/index.d.ts',
       default: './lib/index.js',
     })
-    expect(value.exports?.['./webserver']).toMatchObject({
-      types: './lib/webserver.d.ts',
-      default: './lib/webserver.js',
-    })
+    expect(value.exports?.['./webserver']).toBeUndefined()
     expect(value.exports?.['./client']).toBe('./lib/client.js')
     expect(value.dsh?.bundle?.patch).toBe('./cordis.patch.yml')
     expect(value.dsh?.client).toEqual({ inject: [], platform: 'web', immediately: true })
@@ -55,22 +53,23 @@ describe('combined Profile Bundle declaration', () => {
     expect(ignoreLines).not.toContain('lib/')
   })
 
-  it('pins one DSH release family without bundling another Cordis or WebServer runtime', async () => {
+  it('requires the active official Connection without installing another Harness graph', async () => {
     const value = await manifest()
-    expect(value.dependencies?.['@deepseek-ai/dsh-client-connection']).toBe('0.1.1-rc.2')
-    expect(Object.keys(value.dependencies ?? {})).toEqual(['@deepseek-ai/dsh-client-connection'])
-    expect(value.peerDependencies?.['@deepseek-ai/cordis']).toBe('4.0.1')
-    expect(value.peerDependencies?.['@deepseek-ai/dsh-host-webserver']).toBe('0.1.1-rc.2')
+    expect(value.version).toBe('0.2.0')
+    expect(value.dependencies).toBeUndefined()
+    expect(value.peerDependencies).toEqual({
+      '@deepseek-ai/dsh-client-connection': '0.1.3-alpha.1',
+    })
   })
 
-  it('disables both shipped providers and inserts exactly one compatible replacement for each', async () => {
+  it('configures the official WebServer and replaces only the shipped Connection', async () => {
     const patch = await readFile(resolve(root, 'cordis.patch.yml'), 'utf8')
-    expect(patch.match(/- id: webserver\r?\n  disabled: true/g)).toHaveLength(1)
-    expect(patch.match(/- id: connection\r?\n  name: '@deepseek-ai\/dsh-client-connection'\r?\n  disabled: true/g)).toHaveLength(1)
-    expect(patch.match(/name: dsh-loopback-spoof\/webserver/g)).toHaveLength(1)
-    expect(patch.match(/name: dsh-loopback-spoof(?:\r?\n|$)/g)).toHaveLength(1)
+    expect(patch.match(/- id: webserver\r?\n  config:/g)).toHaveLength(1)
     expect(patch).toContain("host: !!js ctx.webStartup.host ?? '0.0.0.0'")
-    expect(patch).toContain('port: !!js ctx.webStartup.port ?? 3080')
+    expect(patch).toContain('compression: gzip')
+    expect(patch.match(/- id: connection\r?\n  name: '@deepseek-ai\/dsh-client-connection'\r?\n  disabled: true/g)).toHaveLength(1)
+    expect(patch).not.toContain('dsh-loopback-spoof/webserver')
+    expect(patch.match(/name: dsh-loopback-spoof(?:\r?\n|$)/g)).toHaveLength(1)
     expect(patch).toContain('trustedHosts: !!js ctx.webRuntime.trustedHosts')
   })
 
