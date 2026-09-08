@@ -58,7 +58,7 @@ describe('combined Profile Bundle declaration', () => {
     expect(value.version).toBe('0.2.0')
     expect(value.dependencies).toBeUndefined()
     expect(value.peerDependencies).toEqual({
-      '@deepseek-ai/dsh-client-connection': '0.1.3-alpha.1',
+      '@deepseek-ai/dsh-client-connection': '0.1.3-alpha.2',
     })
   })
 

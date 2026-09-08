@@ -8,11 +8,12 @@
  */
 
 import { apply as applyOfficial, Config, inject, name } from '@deepseek-ai/dsh-client-connection'
-import type { Context } from '@deepseek-ai/cordis'
 import type { ConnectionConfig } from '@deepseek-ai/dsh-client-connection'
 
+type HostContext = Parameters<typeof applyOfficial>[0]
+
 /** Apply the official transport while disabling browser-session authentication. */
-export async function apply(ctx: Context, config?: ConnectionConfig): Promise<void> {
+export async function apply(ctx: HostContext, config?: ConnectionConfig): Promise<void> {
   await applyOfficial(ctx, config)
   ctx.inject(['connection'], (connectionCtx) => {
     const connection = connectionCtx.connection as typeof connectionCtx.connection & {
@@ -22,7 +23,7 @@ export async function apply(ctx: Context, config?: ConnectionConfig): Promise<vo
     }
     connection.requestRejection = () => undefined
     connection.authorizeIndex = () => true
-    connection.authenticatedUrl = (baseUrl) => new URL(baseUrl).toString()
+    connection.authenticatedUrl = (baseUrl: string) => new URL(baseUrl).toString()
   })
 }
 
