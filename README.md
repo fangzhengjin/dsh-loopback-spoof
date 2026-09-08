@@ -2,10 +2,10 @@
 
 > **安全警告**
 >
-> - 此 Bundle 默认将 DSH Web 监听地址改为 `0.0.0.0:3080`，并让已认证浏览器获得 loopback 能力判定。
-> - 保留官方一次性启动令牌、签名 Cookie、Host/Origin 信任校验，不再伪造请求来源。
-> - HTTP 本身不提供 TLS；启动 URL 中的令牌只能在可信网络传输，公网或不可信网络必须使用受信任的 TLS 入口和防火墙。
-> - 官方认证只验证浏览器会话，不替代网络访问控制、速率限制或访问审计。
+> - 此 Bundle 默认将 DSH Web 监听地址改为 `0.0.0.0:3080`，并让浏览器获得 loopback 能力判定。
+> - 关闭一次性启动令牌和签名 Cookie，保留 Host/Origin 信任校验。
+> - HTTP 本身不提供 TLS；此 Bundle 预期仅运行在 Tailscale 等受控网络内，公网或不可信网络必须使用受信任的 TLS 入口和防火墙。
+> - 关闭应用层浏览器认证后，网络访问控制由 Tailscale 和部署防火墙负责。
 
 ## 一眼了解
 
@@ -52,7 +52,7 @@
 ### 不会改变
 
 - 静态文件与 SPA fallback 不会被改写。
-- 未认证页面请求仍返回 401，伪造 Host/Origin 的 API 与 WebSocket 请求仍返回 403。
+- 页面、API 与 WebSocket 不再要求 token 或 Cookie，伪造 Host/Origin 的请求仍返回 403。
 - 文件和文件夹打开仍发生在 DSH Host 所在机器。
 - 模型发现与工具执行仍发生在 DSH Host 所在机器。
 - `hasDocument`、`canOpenPath` 等 Host 能力判断仍然保留。
@@ -113,11 +113,11 @@ curl --include \
    - 默认：`0.0.0.0:3080`
    - 传入 `--host 127.0.0.1`：仅本机监听
 2. **认证与信任边界**
-   - 未携带 Cookie 访问 `/` 返回 401
+   - 未携带 Cookie 访问 `/` 正常返回页面
    - 上述伪造 Host/Origin 请求返回 403
-   - `dsh web` 输出本机与 LAN 两个带 `?token=...` 的启动 URL；令牌仅用于首次换取签名 Cookie
+   - `dsh web` 输出本机与 LAN 两个不带 `?token=...` 的启动 URL
 3. **浏览器**
-   - 从终端复制实际输出的 LAN 启动 URL 并打开，跳转后的地址不再包含令牌
+   - 从终端复制实际输出的 LAN 启动 URL 并打开，无需令牌或 Cookie
    - 页面、官方 RPC 与 WebSocket 正常连接，且依赖 loopback 判定的能力可见
 
 > **验证失败时**
@@ -143,7 +143,7 @@ dsh --profile web --no-open
 | 范围 | 安装后的行为 | 保持不变的部分 |
 | --- | --- | --- |
 | WebServer | 未传 `--host` 时监听 `0.0.0.0` | 官方实例、路由 dispatcher、压缩与生命周期 |
-| 动态 HTTP 与 WebSocket | 使用真实请求头、Cookie 和 socket 来源 | 官方 Host/Origin 信任校验与浏览器认证 |
+| 动态 HTTP 与 WebSocket | 使用真实请求头和 socket 来源，不要求 Cookie | 官方 Host/Origin 信任校验 |
 | Host Connection | 继续提供官方 `/api` HTTP 和 WebSocket | 官方 `0.1.3-alpha.1` Connection 实现 |
 | 浏览器 Connection | `ctx.connection.isLoopback` 固定为 `true` | 官方 provider、RPC 和传输实现 |
 | 静态文件与 SPA | 不改写请求 | 官方 `registerFallback()` 与 index 注入 |
@@ -159,14 +159,14 @@ dsh --profile web --no-open
 1. 原位配置官方 WebServer 的默认监听地址和压缩参数。
 2. 禁用官方 Connection 行。
 3. 挂载根 `dsh-loopback-spoof` Connection，并传入官方 Web runtime 推导的 `trustedHosts`。
-4. 保留官方认证、请求信任、RPC、WebSocket 和 WebServer 生命周期。
+4. 保留官方请求信任、RPC、WebSocket 和 WebServer 生命周期，并关闭浏览器 token/Cookie 认证。
 
 ## 已知限制
 
 1. 当前兼容基线是官方 `deepseek-harness` `0.1.3-alpha.1`；预览版本的公开接口变化会让构建阶段主动失败，必须重新核对后升级。
 2. 官方 alpha 包尚未发布到 registry；开发构建必须通过 `DSH_HARNESS_ROOT` 使用匹配版本的官方源码工作区。
 3. 普通 HTTP LAN 页面不具备 TLS 保护；在不可信网络使用时必须放在受信任的 HTTPS 入口之后。
-4. 本插件只改变浏览器 Connection 的 loopback 分类，不伪造 Host 请求、socket 地址或代理头。
+4. 本插件只改变浏览器 Connection 的 loopback 分类和浏览器认证策略，不伪造 Host 请求、socket 地址或代理头。
 
 ## 开发与发布检查
 
@@ -199,7 +199,7 @@ pnpm run check
 完整检查会：
 
 - 生成并安装实际 `.tgz` 到随机临时 `DSH_HOME`；
-- 验证启动令牌换取 Cookie、未认证 401、伪造 Host/Origin 403、认证 WebSocket 和浏览器 Connection；
+- 验证无 token/Cookie 页面访问、伪造 Host/Origin 403、WebSocket 和浏览器 Connection；
 - 验证默认 LAN 监听、显式 `--host 127.0.0.1` 和卸载恢复；
 - 停止临时进程并删除临时 Profile 与 tarball。
 

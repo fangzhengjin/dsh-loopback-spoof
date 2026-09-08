@@ -75,7 +75,8 @@ describe('combined Profile Bundle declaration', () => {
 
   it('keeps the root module free of a JavaScript default export', async () => {
     const source = await readFile(resolve(root, 'src', 'index.ts'), 'utf8')
-    expect(source).toContain("export { Config, apply, inject, name } from '@deepseek-ai/dsh-client-connection'")
+    expect(source).toContain('applyOfficial')
+    expect(source).toContain('connection.requestRejection = () => undefined')
     expect(source).not.toMatch(/export\s+default/)
   })
 })

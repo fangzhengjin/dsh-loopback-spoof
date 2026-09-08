@@ -1,10 +1,30 @@
 /**
  * Host Connection half of the loopback-spoof Bundle. The HTTP, WebSocket,
- * authentication, and request-trust implementation comes from the active DSH
- * installation; the generated browser half provides the same API with
+ * transport and request-trust implementation comes from the active DSH
+ * installation. Browser-session token and Cookie checks are disabled for the
+ * Tailscale-only deployment, while the generated browser half keeps
  * `ctx.connection.isLoopback` fixed to `true`.
  * @module dsh-loopback-spoof
  */
 
-export { Config, apply, inject, name } from '@deepseek-ai/dsh-client-connection'
+import { apply as applyOfficial, Config, inject, name } from '@deepseek-ai/dsh-client-connection'
+import type { Context } from '@deepseek-ai/cordis'
+import type { ConnectionConfig } from '@deepseek-ai/dsh-client-connection'
+
+/** Apply the official transport while disabling browser-session authentication. */
+export async function apply(ctx: Context, config?: ConnectionConfig): Promise<void> {
+  await applyOfficial(ctx, config)
+  ctx.inject(['connection'], (connectionCtx) => {
+    const connection = connectionCtx.connection as typeof connectionCtx.connection & {
+      requestRejection: (request: unknown) => undefined
+      authorizeIndex: (request: unknown, response: unknown) => boolean
+      authenticatedUrl: (baseUrl: string) => string
+    }
+    connection.requestRejection = () => undefined
+    connection.authorizeIndex = () => true
+    connection.authenticatedUrl = (baseUrl) => new URL(baseUrl).toString()
+  })
+}
+
+export { Config, inject, name }
 export type { ConnectionConfig } from '@deepseek-ai/dsh-client-connection'
