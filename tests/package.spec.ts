@@ -76,7 +76,7 @@ describe('combined Profile Bundle declaration', () => {
   it('keeps the root module free of a JavaScript default export', async () => {
     const source = await readFile(resolve(root, 'src', 'index.ts'), 'utf8')
     expect(source).toContain('applyOfficial')
-    expect(source).toContain('connection.requestRejection = () => undefined')
+    expect(source).toContain('return rejection === 401 ? undefined : rejection')
     expect(source).not.toMatch(/export\s+default/)
   })
 })

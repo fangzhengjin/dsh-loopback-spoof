@@ -17,11 +17,15 @@ export async function apply(ctx: HostContext, config?: ConnectionConfig): Promis
   await applyOfficial(ctx, config)
   ctx.inject(['connection'], (connectionCtx) => {
     const connection = connectionCtx.connection as typeof connectionCtx.connection & {
-      requestRejection: (request: unknown) => undefined
+      requestRejection: (request: unknown) => 401 | 403 | undefined
       authorizeIndex: (request: unknown, response: unknown) => boolean
       authenticatedUrl: (baseUrl: string) => string
     }
-    connection.requestRejection = () => undefined
+    const requestRejection = connection.requestRejection.bind(connection)
+    connection.requestRejection = (request) => {
+      const rejection = requestRejection(request)
+      return rejection === 401 ? undefined : rejection
+    }
     connection.authorizeIndex = () => true
     connection.authenticatedUrl = (baseUrl: string) => new URL(baseUrl).toString()
   })
