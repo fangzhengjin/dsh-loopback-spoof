@@ -70,7 +70,7 @@ describe('combined Profile Bundle declaration', () => {
     expect(patch.match(/- id: connection\r?\n  name: '@deepseek-ai\/dsh-client-connection'\r?\n  disabled: true/g)).toHaveLength(1)
     expect(patch).not.toContain('dsh-loopback-spoof/webserver')
     expect(patch.match(/name: dsh-loopback-spoof(?:\r?\n|$)/g)).toHaveLength(1)
-    expect(patch).toContain('trustedHosts: !!js ctx.webRuntime.trustedHosts')
+    expect(patch).toContain('trustedHosts: !!js "[\'dsh.hale-halibut.ts.net\', ...ctx.webRuntime.trustedHosts]"')
   })
 
   it('keeps the root module free of a JavaScript default export', async () => {

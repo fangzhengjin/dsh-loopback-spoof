@@ -20,4 +20,4 @@
       name: dsh-loopback-spoof
       inject: [webRuntime]
       config:
-        trustedHosts: !!js ctx.webRuntime.trustedHosts
+        trustedHosts: !!js "['dsh.hale-halibut.ts.net', ...ctx.webRuntime.trustedHosts]"
